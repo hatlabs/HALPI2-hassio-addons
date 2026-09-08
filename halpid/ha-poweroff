@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# halpid runs this when the DC input stays below the blackout voltage limit.
+# An add-on cannot halt the host itself, so ask the Supervisor to do it.
+set -euo pipefail
+
+exec curl -fsS -X POST \
+    -H "Authorization: Bearer ${SUPERVISOR_TOKEN}" \
+    http://supervisor/host/shutdown

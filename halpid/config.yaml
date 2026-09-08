@@ -1,0 +1,30 @@
+name: HALPI2 daemon
+slug: halpid
+version: 5.1.1-1
+description: Power monitoring, watchdog, LED and USB port control for the HALPI2 carrier board
+url: https://github.com/hatlabs/HALPI2-hassio-addons/tree/main/halpid
+arch:
+  - aarch64
+init: false
+startup: system
+boot: auto
+hassio_api: true
+hassio_role: manager
+devices:
+  - /dev/i2c-1
+map:
+  - share:rw
+options:
+  i2c_bus: 1
+  i2c_addr: "0x6D"
+  blackout_time_limit: 5.0
+  blackout_voltage_limit: 9.0
+  shutdown_host: true
+  log_level: info
+schema:
+  i2c_bus: int(0,10)
+  i2c_addr: str
+  blackout_time_limit: float(0.1,3600)
+  blackout_voltage_limit: float(5.0,15.0)
+  shutdown_host: bool
+  log_level: list(error|warn|info|debug|trace)
