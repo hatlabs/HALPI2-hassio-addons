@@ -55,6 +55,8 @@ The board reboots and all five LEDs turn solid red.
 | `blackout_time_limit` | `5.0` | Seconds below the voltage limit before shutdown starts |
 | `blackout_voltage_limit` | `9.0` | DC input voltage that counts as a blackout |
 | `shutdown_host` | `true` | Halt the host on a blackout |
+| `mqtt` | `true` | Publish readings and USB switches over MQTT |
+| `mqtt_interval` | `5` | Seconds between MQTT state publishes |
 | `log_level` | `info` | `error`, `warn`, `info`, `debug` or `trace` |
 
 Set `shutdown_host` to `false` to watch the blackout logic without it halting
@@ -80,6 +82,36 @@ sudo docker exec app_local_halpid halpi usb
 
 A container that reaches the socket directly needs to run as root or as a
 member of GID 960.
+
+## Home Assistant entities
+
+The add-on publishes to the MQTT broker the Supervisor gives it, using Home
+Assistant discovery, so the entities appear on their own without any YAML. The
+service is declared `mqtt:want`: with no broker installed the add-on still runs
+the daemon and the watchdog, and publishes nothing.
+
+One device, `HALPI2`, carrying:
+
+| Entity | Kind |
+|--------|------|
+| DC input voltage, DC input current, supercapacitor voltage | sensor |
+| Controller temperature, board temperature | sensor |
+| Controller state, watchdog elapsed, watchdog, 5 V output | diagnostic |
+| USB port 0 to USB port 3 | switch |
+
+The controller reports temperatures in kelvin; the add-on converts them to
+degrees Celsius before publishing.
+
+**A USB switch cuts power to whatever is plugged into that port.** On a machine
+whose Z-Wave or Zigbee coordinator is a USB stick, turning off the wrong port
+takes that network down until it is turned back on. Check which port holds what
+before using the switches.
+
+Topics, for anything that wants them directly:
+
+- `halpi2/<device_id>/state` — every value as one retained JSON message
+- `halpi2/<device_id>/availability` — `online` or `offline`
+- `halpi2/<device_id>/usb/<0-3>/set` — `ON` or `OFF`
 
 ## Shutting the host down
 

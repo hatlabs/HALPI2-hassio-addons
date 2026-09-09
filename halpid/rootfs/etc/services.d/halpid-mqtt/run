@@ -1,0 +1,159 @@
+#!/usr/bin/with-contenv bashio
+# Publishes halpid readings to MQTT with Home Assistant discovery, and applies
+# USB port switch commands. Runs beside halpid, which is the container's main
+# process; this service never brings the daemon down.
+
+set -o pipefail
+
+readonly SOCK=/share/halpid/halpid.sock
+
+if ! bashio::config.true 'mqtt'; then
+    bashio::log.info "MQTT publishing is turned off"
+    exec sleep infinity
+fi
+
+if ! bashio::services.available 'mqtt'; then
+    bashio::log.warning "No MQTT service configured; halpid runs, nothing is published"
+    exec sleep infinity
+fi
+
+readonly MQTT_HOST=$(bashio::services mqtt "host")
+readonly MQTT_PORT=$(bashio::services mqtt "port")
+readonly MQTT_USER=$(bashio::services mqtt "username")
+readonly MQTT_PASS=$(bashio::services mqtt "password")
+readonly INTERVAL=$(bashio::config 'mqtt_interval')
+
+pub() {
+    mosquitto_pub -h "${MQTT_HOST}" -p "${MQTT_PORT}" \
+        -u "${MQTT_USER}" -P "${MQTT_PASS}" "$@"
+}
+
+api() {
+    curl -sS --unix-socket "${SOCK}" "http://localhost$1" "${@:2}"
+}
+
+while [ ! -S "${SOCK}" ]; do
+    sleep 1
+done
+
+readonly VALUES=$(api /values)
+readonly DEVICE_ID=$(jq -r '.device_id' <<< "${VALUES}")
+readonly FIRMWARE=$(jq -r '.firmware_version' <<< "${VALUES}")
+readonly NODE="halpi2_${DEVICE_ID}"
+readonly T="halpi2/${DEVICE_ID}"
+
+readonly DEVICE=$(jq -c -n --arg id "${NODE}" --arg sw "${FIRMWARE}" \
+    '{identifiers:[$id], name:"HALPI2", manufacturer:"Hat Labs Oy",
+      model:"HALPI2", sw_version:$sw}')
+
+# Temperatures come off the controller in kelvin.
+state_json() {
+    local values usb
+    values=$(api /values) || return 1
+    usb=$(api /usb) || return 1
+    jq -c -n --argjson v "${values}" --argjson u "${usb}" '
+        $v + $u
+        | .T_mcu = (($v.T_mcu - 273.15) * 10 | round / 10)
+        | .T_pcb = (($v.T_pcb - 273.15) * 10 | round / 10)
+        | .V_in  = (($v.V_in  * 100 | round) / 100)
+        | .V_cap = (($v.V_cap * 100 | round) / 100)
+        | .I_in  = (($v.I_in  * 100 | round) / 100)'
+}
+
+entity_config() {
+    local component=$1 key=$2 payload=$3
+    pub -t "homeassistant/${component}/${NODE}/${key}/config" -r -m "${payload}"
+}
+
+sensor() {  # key name template unit device_class state_class category
+    entity_config "$1" "$2" "$(jq -c -n \
+        --argjson dev "${DEVICE}" \
+        --arg uid "${NODE}_$2" --arg name "$3" --arg tpl "$4" \
+        --arg unit "$5" --arg dc "$6" --arg sc "$7" --arg cat "$8" \
+        --arg st "${T}/state" --arg av "${T}/availability" '
+        {name:$name, unique_id:$uid, state_topic:$st, value_template:$tpl,
+         availability_topic:$av, device:$dev}
+        + (if $unit == "" then {} else {unit_of_measurement:$unit} end)
+        + (if $dc   == "" then {} else {device_class:$dc} end)
+        + (if $sc   == "" then {} else {state_class:$sc} end)
+        + (if $cat  == "" then {} else {entity_category:$cat} end)')"
+}
+
+usb_switch() {  # port
+    entity_config switch "usb$1" "$(jq -c -n \
+        --argjson dev "${DEVICE}" \
+        --arg uid "${NODE}_usb$1" --arg name "USB port $1" \
+        --arg tpl "{{ 'ON' if value_json.usb$1 else 'OFF' }}" \
+        --arg st "${T}/state" --arg cmd "${T}/usb/$1/set" \
+        --arg av "${T}/availability" '
+        {name:$name, unique_id:$uid, state_topic:$st, value_template:$tpl,
+         command_topic:$cmd, payload_on:"ON", payload_off:"OFF",
+         availability_topic:$av, icon:"mdi:usb-port", device:$dev}')"
+}
+
+publish_discovery() {
+    sensor sensor v_in "DC input voltage" '{{ value_json.V_in }}' V voltage measurement ""
+    sensor sensor i_in "DC input current" '{{ value_json.I_in }}' A current measurement ""
+    sensor sensor v_cap "Supercapacitor voltage" '{{ value_json.V_cap }}' V voltage measurement ""
+    sensor sensor t_mcu "Controller temperature" '{{ value_json.T_mcu }}' "°C" temperature measurement ""
+    sensor sensor t_pcb "Board temperature" '{{ value_json.T_pcb }}' "°C" temperature measurement ""
+    sensor sensor power_state "Controller state" '{{ value_json.state }}' "" "" "" diagnostic
+    sensor sensor watchdog_elapsed "Watchdog elapsed" '{{ value_json.watchdog_elapsed }}' s duration measurement diagnostic
+    sensor binary_sensor watchdog_enabled "Watchdog" "{{ 'ON' if value_json.watchdog_enabled else 'OFF' }}" "" "" "" diagnostic
+    sensor binary_sensor output_5v "5 V output" "{{ 'ON' if value_json['5v_output_enabled'] else 'OFF' }}" "" "" "" diagnostic
+
+    local port
+    for port in 0 1 2 3; do
+        usb_switch "${port}"
+    done
+}
+
+state_loop() {
+    while true; do
+        state_json || bashio::log.warning "Could not read the halpid API"
+        sleep "${INTERVAL}"
+    done | mosquitto_pub -h "${MQTT_HOST}" -p "${MQTT_PORT}" \
+        -u "${MQTT_USER}" -P "${MQTT_PASS}" \
+        -t "${T}/state" -l -r \
+        --will-topic "${T}/availability" --will-payload offline --will-retain
+}
+
+command_loop() {
+    mosquitto_sub -h "${MQTT_HOST}" -p "${MQTT_PORT}" \
+        -u "${MQTT_USER}" -P "${MQTT_PASS}" \
+        -t "${T}/usb/+/set" -F "%t %p" |
+    while read -r topic payload; do
+        local port=${topic#"${T}/usb/"}
+        port=${port%/set}
+        case "${port}" in
+            0|1|2|3) ;;
+            *) continue ;;
+        esac
+        case "${payload}" in
+            ON|on|true|1) body=true ;;
+            *) body=false ;;
+        esac
+        bashio::log.info "Setting USB port ${port} to ${body}"
+        if api "/usb/${port}" -X PUT -H "Content-Type: application/json" \
+               -d "${body}" > /dev/null; then
+            state=$(state_json) && pub -t "${T}/state" -r -m "${state}"
+        else
+            bashio::log.warning "USB port ${port} command failed"
+        fi
+    done
+}
+
+bashio::log.info "Publishing HALPI2 ${DEVICE_ID} to MQTT every ${INTERVAL}s"
+pub -t "${T}/availability" -r -m online
+publish_discovery
+
+state_loop &
+readonly STATE_PID=$!
+command_loop &
+readonly COMMAND_PID=$!
+
+trap 'pub -t "${T}/availability" -r -m offline; kill "${STATE_PID}" "${COMMAND_PID}" 2>/dev/null' EXIT INT TERM
+
+wait -n
+bashio::log.warning "An MQTT loop exited; restarting the service"
+exit 1
