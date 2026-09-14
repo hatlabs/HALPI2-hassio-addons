@@ -68,7 +68,7 @@ controller; it just runs no command.
 halpid serves an HTTP API over a UNIX socket. The add-on puts both of its
 sockets on the shared `/share` directory so other add-ons can reach them:
 
-- `/share/halpid/halpid.sock` — the daemon API, group `halpid` (GID 960)
+- `/share/halpid/halpid.sock` — the daemon API, group `adm`
 - `/share/halpid/led.sock` — LED override, group `adm`
 
 The bundled `halpi` CLI has no option for the socket path and always opens
@@ -81,7 +81,7 @@ sudo docker exec app_local_halpid halpi usb
 ```
 
 A container that reaches the socket directly needs to run as root or as a
-member of GID 960.
+member of the `adm` group.
 
 ## Home Assistant entities
 
