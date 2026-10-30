@@ -35,7 +35,9 @@ sudo docker run --rm -v /mnt/overlay:/ov alpine \
   sh -c 'echo i2c-dev > /ov/etc/modules-load.d/i2c-dev.conf'
 ```
 
-Reboot the host. Confirm the result before installing the add-on:
+If the system boots from NVMe, do the SD interface step below before
+rebooting, so one reboot covers both. Reboot the host. Confirm the result
+before installing the add-on:
 
 ```bash
 ls /dev/i2c-1
@@ -43,6 +45,37 @@ ls /dev/i2c-1
 
 RAUC rewrites the `os_prefix` line of the same `config.txt` when Home Assistant
 OS updates, so check the I2C parameter after an OS update.
+
+## Booting from NVMe: disable the SD interface
+
+Do this only if the running system boots Home Assistant OS from an NVMe
+drive; having Home Assistant OS installed on an NVMe drive is not enough. The
+parameter below disables the CM5's SD interface, which serves both the microSD
+slot and the CM5's onboard eMMC. If Home Assistant OS boots from either of
+those, the device does not boot after the next restart. An eMMC install can
+then only be recovered over USB with `rpiboot`; a microSD install by removing
+the line from `config.txt` on another computer.
+
+With the SD interface enabled, shutdown can stall long enough that the
+supercapacitors run out before the operating system has halted, so a power
+failure ends in an uncontrolled power cut. The stock `config.txt` ends in its
+`[all]` section, so appending the parameter is enough. The command adds it
+only if it is not already there:
+
+```bash
+sudo docker run --rm -v /mnt/boot:/boot alpine sh -c \
+  'grep -q "^dtparam=sd=off" /boot/config.txt || echo dtparam=sd=off >> /boot/config.txt'
+```
+
+Reboot the host for the change to take effect.
+
+As with the I2C parameter, check after a Home Assistant OS update that the
+line is still there, and run the command above again if this prints nothing:
+
+```bash
+sudo docker run --rm -v /mnt/boot:/boot alpine \
+  grep -n "^dtparam=sd=off" /boot/config.txt
+```
 
 ## The watchdog
 
